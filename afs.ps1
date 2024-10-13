@@ -1,6 +1,7 @@
 # File: afs.ps1
 # made by t.me/olekovin
 # and ofc a brave and smart claude.ai and copilot
+# Рухає файли з та у вказану директорію
 
 # Функція для зчитування конфігураційного файлу
 function Read-Config {
@@ -17,6 +18,20 @@ function Read-Config {
     } else {
         Write-Host "Config file not found: $ConfigPath"
     }
+
+    # Перевірка обов'язкових параметрів
+    $requiredParams = @("interval", "repetitive_interval", "src_path", "dst_path")
+    foreach ($param in $requiredParams) {
+        if (-not $config.ContainsKey($param) -or [string]::IsNullOrWhiteSpace($config[$param])) {
+            throw "Configuration error: Missing or empty required parameter '$param'"
+        }
+    }
+
+    # Перевірка коректності значення interval
+    if ($config["interval"] -notin @("on-boot", "repetitive", "once")) {
+        throw "Configuration error: Invalid value for 'interval'. Must be 'on-boot', 'repetitive', or 'once'."
+    }
+
     return $config
 }
 
@@ -123,19 +138,35 @@ function Add-SchedulerTask {
         "on-boot" {
             $trigger = New-ScheduledTaskTrigger -AtStartup
         }
-        "repetetive" {
-            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Seconds $RepetitiveInterval)
+        "repetitive" {
+            if ($RepetitiveInterval -lt 60) {
+                $RepetitiveInterval = 60
+                Write-Host "Warning: Minimum interval is 1 minute. Setting interval to 60 seconds."
+            }
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Seconds $RepetitiveInterval) -RepetitionDuration ([TimeSpan]::MaxValue)
         }
         "once" {
             $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date)
         }
+        "" {
+            throw "Scheduler interval is not specified in the configuration."
+        }
         default {
-            throw "Invalid scheduler interval"
+            throw "Invalid scheduler interval: $Interval. Valid values are 'on-boot', 'repetitive', or 'once'."
         }
     }
     
-    Register-ScheduledTask -Action $action -Trigger $trigger -TaskName $TaskName -Description "AutoFileSorter Task"
+    try {
+        $task = Register-ScheduledTask -Action $action -Trigger $trigger -TaskName $TaskName -Description "AutoFileSorter Task" -ErrorAction Stop
+        Write-Host "Task successfully created: $TaskName"
+        return $task
+    }
+    catch {
+        Write-Host "Error creating task: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
 }
+
 
 # Функція для видалення завдання з планувальника
 function Remove-SchedulerTask {
@@ -325,11 +356,11 @@ debug=true
 # Scheduler action (add, remove, or check)
 scheduler=
 
-# Interval for scheduled runs (once, on-boot, or repetetive)
-interval=once
+# Interval for scheduled runs (once, on-boot, or repetitive)
+interval=repetitive
 
 # Interval in seconds for repetitive scheduling
-repetetive_interval=3600
+repetitive_interval=3600
 
 # Path for the log file (leave empty for default location)
 log_path=
@@ -383,8 +414,10 @@ function Show-AdminMenu {
                     } else {
                         $confirm = Read-Host "Task is currently disabled. Do you want to enable it? (Y/N)"
                         if ($confirm -eq "Y") {
-                            Add-SchedulerTask -TaskName $taskName -ScriptPath $PSCommandPath -Interval $Config.interval -RepetitiveInterval $Config.repetetive_interval
-                            Write-Host "$((Get-LocalizedString -Key "TaskCreated" -Lang $lang)) $taskName"
+                            $task = Add-SchedulerTask -TaskName $taskName -ScriptPath $PSCommandPath -Interval $Config.interval -RepetitiveInterval $Config.repetitive_interval
+                            if ($task) {
+                                Write-Host "$((Get-LocalizedString -Key "TaskCreated" -Lang $lang)) $taskName"
+                            }
                         }
                     }
                 }
@@ -454,6 +487,8 @@ try {
             "remove_logs_older_than" = "30"
             "src_path" = ""
             "dst_path" = ""
+            "interval" = "once"
+            "repetitive_interval" = "3600"
         }
     } else {
         $config = Read-Config -ConfigPath $configPath
@@ -471,8 +506,12 @@ try {
     } else {
         if ($config.scheduler -eq "add") {
             if (-not (Test-SchedulerTask -TaskName $taskName)) {
-                Add-SchedulerTask -TaskName $taskName -ScriptPath $PSCommandPath -Interval $config.interval -RepetitiveInterval $config.repetetive_interval
-                Write-Log -Message "$((Get-LocalizedString -Key "TaskCreated" -Lang $config.script_processing_lang)) $taskName" -LogPath $logPath
+                $task = Add-SchedulerTask -TaskName $taskName -ScriptPath $PSCommandPath -Interval $config.interval -RepetitiveInterval $config.repetitive_interval
+                if ($task) {
+                    Write-Log -Message "$((Get-LocalizedString -Key "TaskCreated" -Lang $config.script_processing_lang)) $taskName" -LogPath $logPath
+                } else {
+                    Write-Log -Message "Failed to create scheduled task" -LogPath $logPath -Level "ERROR"
+                }
             } else {
                 Write-Log -Message "$((Get-LocalizedString -Key "TaskExists" -Lang $config.script_processing_lang)) $taskName" -LogPath $logPath
             }
